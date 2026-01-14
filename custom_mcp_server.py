@@ -50,7 +50,7 @@ class LocalRAG:
             return
         # Cloud Embedding Configuration
         self.api_url = "https://openrouter.ai/api/v1/embeddings"
-        self.api_key = "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"
+        self.api_key = "sk-or-v1-d1a3f5ee13d0fd4627*************2790a79c77ddcdc5ca694c9048a01f"
         self.model_name = "baai/bge-m3"
         
         # Configure requests with retry logic
