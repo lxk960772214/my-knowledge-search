@@ -41,7 +41,11 @@
         "run",
         "custom_mcp_server.py",
         "/Users/你的用户名/Documents/Notes/",
-        "/Users/你的用户名/Documents/USER/"
+        "/Users/你的用户名/Documents/USER/",
+        "--exclude-dirs",
+        "test,logs,tmp,/Users/你的用户名/Documents/Private",
+        "--exclude-files",
+        "secret.md,draft.md,/Users/你的用户名/Documents/Notes/unfinished.md"
       ],
       "registryUrl": "https://pypi.tuna.tsinghua.edu.cn/simple"
     }
@@ -50,7 +54,8 @@
 ```
 > **注意**: 
 > 1. `command` 请替换为你本地 uv 的绝对路径 (可通过 `which uv` 查看)。
-> 2. custom_mcp_server.py 后续参数是你希望被索引的**文件夹路径**（支持多个）。
+> 2. `custom_mcp_server.py` 后续参数是你希望被索引的**文件夹路径**（支持多个）。
+> 3. `--exclude-dirs` 和 `--exclude-files` 支持传入目录/文件名（如 `test`）或完整绝对路径（如 `/Users/.../test`），多个路径用逗号分隔。
 
 ## 📖 最佳实践
 
@@ -83,29 +88,43 @@ description: 记录生产环境常用的 Linux 排查命令
 建议将以下内容复制到 AI 助手的 System Prompt 中，以获得最佳使用体验：
 
 ```text
-请按照以下步骤回答用户问题：
+请严格按照以下【速度优先】策略执行：
 
-1. **定位文档 (Broad Search)**:
-   - 先分析用户问题属于哪个技术领域或客户项目。
-   - 使用最核心的关键词（如 "python", "linux", "赛力斯", "Gee-Yee"）调用 `search_files` 工具。
-   - *不要* 一开始就使用长难句搜索，因为文件名通常只包含核心词。
+⚡️ 快速定位 (Quick Search):
 
-2. **精准提取 (Deep Read)**:
-   - 根据第 1 步返回的文件列表，选择最可能包含答案的文件。
-   - **策略**: 为了保证速度，优先只打开 1 篇最相关的文件。如果未找到答案，再尝试其他文件。
-   - 使用具体的长尾关键词（如 "pytorch 安装验证", "login password"）调用 `read_relevant_content` 工具。
-   - 这一步利用 RAG 技术，可以在文档内部进行精准的语义搜索。
+提取用户问题中的 1-2 个最核心名词（如 "Linux", "A客户"）作为关键词。
+调用 search_files。
+🚫 禁止使用长句或复杂描述进行搜索。
 
-3. **综合回答**:
-   - 根据提取到的内容回答用户问题。
-   - 示例：用户问“给我linux文档中docker+nginx部分”。
-     - 动作 1: 优先检索带有 "linux" 关键词的文档 (不需要查找文件名带 docker/nginx 的)。
-     - 动作 2: 在上一步找到的文档中，查找和 "docker+nginx" 相关的部分。
+🎯 单点突破 (One-Shot Read):
+
+从搜索结果中，直接选择 得分最高 (Top 1) 的那个文件。
+仅当 Top 1 明显不相关时，才考虑 Top 2。
+使用具体的问题细节（如 "docker nginx 配置", "cuda 安装命令"）调用 read_relevant_content。
+
+🚀 即时响应 (Instant Reply):
+
+获取 RAG 返回的片段后，立即总结回答。
+即使相似度分数不高，只要内容相关，就直接使用，不要进行二次检索。
+🚫 除非完全未找到相关信息，否则严禁尝试打开第二个文件。
+
+✅ 案例示范:
+
+用户: "给我linux文档中docker+nginx部分"
+-> 动作 1: search_files("Linux") (只搜核心词)
+-> 动作 2: 在 Top 1 文件检索"docker nginx 配置"
+
+用户: "查一下安装包目录里的 CUDA 安装方法"
+-> 动作 1: search_files("安装包")
+-> 动作 2: 找到 安装包/readme.md，检索"CUDA 安装命令"
+
 ```
 
 
+
+
 # 🧾下一步计划
-- 新增忽略文件，忽略目录
-- embedding 模型通过环境变量配置。已完成。
-- 优化得分逻辑，优先最高得分文档匹配，提高检索效率
+- 新增忽略文件，忽略目录。已完成
+- embedding 模型通过环境变量配置。已完成
+- 优化得分逻辑，优先最高得分文档匹配，提高检索效率。已完成
 

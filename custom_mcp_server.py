@@ -19,25 +19,66 @@ except ImportError:
 parser = argparse.ArgumentParser(description='Local Knowledge MCP Server')
 parser.add_argument('roots', metavar='DIR', type=str, nargs='+',
                     help='Directories to search in')
+parser.add_argument('--exclude-dirs', type=str, default='',
+                    help='Comma-separated list of directories to exclude')
+parser.add_argument('--exclude-files', type=str, default='',
+                    help='Comma-separated list of files to exclude')
 
 # 初始化 MCP Server
 mcp = FastMCP("LocalKnowledgeSearch")
 
-# 获取搜索目录
+# 获取搜索目录和过滤配置
 SEARCH_ROOTS = []
+GLOBAL_EXCLUDE_DIRS = set()
+GLOBAL_EXCLUDE_FILES = set()
 
-def _init_search_roots():
-    global SEARCH_ROOTS
-    args = sys.argv[1:]
-    for arg in args:
-        if os.path.isdir(arg):
-            SEARCH_ROOTS.append(os.path.abspath(arg))
+def _init_config():
+    global SEARCH_ROOTS, GLOBAL_EXCLUDE_DIRS, GLOBAL_EXCLUDE_FILES
     
+    # 使用 argparse 解析参数，但要注意 mcp.run() 可能会干扰参数解析
+    # 这里我们手动处理 sys.argv 以避免与 FastMCP 的参数冲突
+    # FastMCP 通常接管了 server 的运行，但我们可以提取我们需要的参数
+    
+    args = sys.argv[1:]
+    clean_args = []
+    
+    # 简单的手动解析，提取 --exclude-dirs 和 --exclude-files
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == '--exclude-dirs':
+            if i + 1 < len(args):
+                GLOBAL_EXCLUDE_DIRS.update([d.strip() for d in args[i+1].split(',') if d.strip()])
+                i += 2
+            else:
+                i += 1
+        elif arg.startswith('--exclude-dirs='):
+            val = arg.split('=', 1)[1]
+            GLOBAL_EXCLUDE_DIRS.update([d.strip() for d in val.split(',') if d.strip()])
+            i += 1
+        elif arg == '--exclude-files':
+            if i + 1 < len(args):
+                GLOBAL_EXCLUDE_FILES.update([f.strip() for f in args[i+1].split(',') if f.strip()])
+                i += 2
+            else:
+                i += 1
+        elif arg.startswith('--exclude-files='):
+            val = arg.split('=', 1)[1]
+            GLOBAL_EXCLUDE_FILES.update([f.strip() for f in val.split(',') if f.strip()])
+            i += 1
+        else:
+            if os.path.isdir(arg):
+                SEARCH_ROOTS.append(os.path.abspath(arg))
+            i += 1
+            
     if not SEARCH_ROOTS:
          SEARCH_ROOTS = []
+         
     print(f"Initialized search roots: {SEARCH_ROOTS}", file=sys.stderr)
+    print(f"Global exclude dirs: {GLOBAL_EXCLUDE_DIRS}", file=sys.stderr)
+    print(f"Global exclude files: {GLOBAL_EXCLUDE_FILES}", file=sys.stderr)
 
-_init_search_roots()
+_init_config()
 
 import time
 from requests.adapters import HTTPAdapter
@@ -144,7 +185,7 @@ def get_rag():
     return _rag_instance
 
 @mcp.tool()
-def search_files(query: str) -> str:
+def search_files(query: str, exclude_dirs: str = None, exclude_files: str = None) -> str:
     """
     Search for files using fuzzy keywords. 
     Matches filenames and YAML Front Matter metadata (tags, aliases, clients) with high priority.
@@ -152,11 +193,26 @@ def search_files(query: str) -> str:
     
     Args:
         query: The search term (e.g., "python", "byd", "migration").
+        exclude_dirs: Optional comma-separated list of directory names to exclude (e.g. "node_modules,test").
+        exclude_files: Optional comma-separated list of filenames to exclude.
     """
     results = []
     query_lower = query.lower()
     
+    # Initialize ignore sets with defaults and global config
+    ignored_dirs_set = {'.git', 'node_modules', '__pycache__', '.idea', '.vscode', 'venv', 'env'}
+    ignored_dirs_set.update(GLOBAL_EXCLUDE_DIRS)
+    if exclude_dirs:
+        ignored_dirs_set.update([d.strip() for d in exclude_dirs.split(',') if d.strip()])
+        
+    ignored_files_set = {'.DS_Store'}
+    ignored_files_set.update(GLOBAL_EXCLUDE_FILES)
+    if exclude_files:
+        ignored_files_set.update([f.strip() for f in exclude_files.split(',') if f.strip()])
+    
     print(f"Searching for '{query}' in {len(SEARCH_ROOTS)} directories (Performance Mode)...")
+    if exclude_dirs:
+        print(f"Ignoring directories: {ignored_dirs_set}")
 
     for root_dir in SEARCH_ROOTS:
         if not os.path.exists(root_dir):
@@ -164,42 +220,67 @@ def search_files(query: str) -> str:
             
         # Search in current directory
         for root, dirs, files in os.walk(root_dir):
-            # Check if current directory name matches query
+            # Modify dirs in-place to prune search tree
+            # 支持 1. 目录名在忽略列表中 2. 目录完整路径在忽略列表中
+            i = 0
+            while i < len(dirs):
+                d = dirs[i]
+                full_dir_path = os.path.join(root, d)
+                if d.startswith('.') or d in ignored_dirs_set or full_dir_path in ignored_dirs_set:
+                    del dirs[i]
+                else:
+                    i += 1
+            
             current_dir_name = os.path.basename(root)
-            if query_lower in current_dir_name.lower():
-                # If directory matches, prioritize readme*.md inside it
-                for file in files:
-                    if file.lower().startswith('readme') and file.lower().endswith('.md'):
-                         results.append({
-                            "score": 50, # High score for directory match
-                            "name": file,
-                            "path": os.path.join(root, file),
-                            "reason": f"DirectoryMatch({current_dir_name})"
-                        })
+            dir_matches = query_lower in current_dir_name.lower()
+            
+            # Pre-calculate ancestor matches (Optimization)
+            ancestor_score = 0
+            ancestor_reason = ""
+            
+            if not dir_matches:
+                parent_dir = os.path.dirname(root)
+                grandparent_dir = os.path.dirname(parent_dir)
+                
+                parent_name = os.path.basename(parent_dir)
+                grandparent_name = os.path.basename(grandparent_dir)
+                
+                if query_lower in parent_name.lower():
+                    ancestor_score = 10
+                    ancestor_reason = f"AncestorDirMatch({parent_name} - Readme)"
+                elif query_lower in grandparent_name.lower():
+                    ancestor_score = 10
+                    ancestor_reason = f"AncestorDirMatch({grandparent_name} - Readme)"
 
             for file in files:
-                # 排除系统文件和非MD文件
-                if file.startswith('.') or not file.lower().endswith('.md'):
+                file_path = os.path.join(root, file)
+                
+                # 排除系统文件、非MD文件以及指定忽略的文件/路径
+                if (file.startswith('.') or 
+                    not file.lower().endswith('.md') or 
+                    file in ignored_files_set or 
+                    file_path in ignored_files_set):
                     continue
                 
-                file_path = os.path.join(root, file)
                 score = 0
                 match_reasons = []
+                is_readme = file.lower().startswith('readme')
                 
-                # 1. 文件名匹配
+                # 1. 目录名匹配
+                if dir_matches:
+                    if is_readme:
+                        score += 30
+                        match_reasons.append(f"DirectoryMatch({current_dir_name} - Readme)")
+                elif is_readme and ancestor_score > 0:
+                    score += ancestor_score
+                    match_reasons.append(ancestor_reason)
+                        
+                # 2. 文件名匹配
                 if query_lower in file.lower():
-                    score += 10
+                    score += 30
                     match_reasons.append("Filename")
                 
-                # [NEW] 1.5 目录名匹配 (Customer Directory Awareness)
-                # 如果当前文件是 readme.md 且其父目录名包含查询词
-                if file.lower().startswith('readme'):
-                    parent_dir_name = os.path.basename(root)
-                    if query_lower in parent_dir_name.lower():
-                        score += 20  # 极高权重
-                        match_reasons.append(f"ParentDir({parent_dir_name})")
-                
-                # 2. 仅匹配 YAML Front Matter (文件头)
+                # 3. 仅匹配 YAML Front Matter (文件头)
                 try:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         head_content = f.read(500) 
@@ -208,7 +289,7 @@ def search_files(query: str) -> str:
                             if end_idx != -1:
                                 yaml_block = head_content[3:end_idx].lower()
                                 if query_lower in yaml_block:
-                                    score += 15
+                                    score += 10
                                     match_reasons.append("Metadata/Tag")
                 except Exception:
                     pass
@@ -222,15 +303,6 @@ def search_files(query: str) -> str:
                     })
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    
-    # Deduplicate results based on file path (Keep the highest score)
-    unique_results = []
-    seen_paths = set()
-    for res in results:
-        if res['path'] not in seen_paths:
-            unique_results.append(res)
-            seen_paths.add(res['path'])
-    results = unique_results
     
     if not results:
         return f"No files found matching '{query}'."
